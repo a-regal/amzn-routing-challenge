@@ -1,144 +1,82 @@
 from os import path
 import sys, json, time
+import torch
+import numpy as np
+from model import Net
+from dataset import NodeDataset
 
 # Get Directory
 BASE_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 
 # Read input data
-print('Reading Input Data')
+print('Reading Weights into network')
+
 # Model Build output
-model_path=path.join(BASE_DIR, 'data/model_build_outputs/model.json')
-with open(model_path, newline='') as in_file:
-    model_build_out = json.load(in_file)
-# Prediction Routes (Model Apply input)
-prediction_routes_path = path.join(BASE_DIR, 'data/model_apply_inputs/new_route_data.json')
-with open(prediction_routes_path, newline='') as in_file:
-    prediction_routes = json.load(in_file)
+model_path=path.join(BASE_DIR, 'data/model_build_outputs/mlp_state_dict.pt')
 
-def sort_by_key(stops, sort_by):
-    """
-    Takes in the `prediction_routes[route_id]['stops']` dictionary
-    Returns a dictionary of the stops with their sorted order always placing the depot first
+net = Net()
+net.load_state_dict(torch.load(model_path))
 
-    EG:
+print('Reading new dataset')
+test_routes_path = path.join(BASE_DIR, 'data/model_apply_inputs/new_route_data.json')
+test_travel_path = path.join(BASE_DIR, 'data/model_apply_inputs/new_travel_times.json')
+test_pacakge_path = path.join(BASE_DIR, 'data/model_apply_inputs/new_package_data.json')
 
-    Input:
-    ```
-    stops={
-      "Depot": {
-        "lat": 42.139891,
-        "lng": -71.494346,
-        "type": "depot",
-        "zone_id": null
-      },
-      "StopID_001": {
-        "lat": 43.139891,
-        "lng": -71.494346,
-        "type": "delivery",
-        "zone_id": "A-2.2A"
-      },
-      "StopID_002": {
-        "lat": 42.139891,
-        "lng": -71.494346,
-        "type": "delivery",
-        "zone_id": "P-13.1B"
-      }
-    }
+dataset = NodeDataset(test_pacakge_path, test_travel_path, test_routes_path, train=False)
 
-    print (sort_by_key(stops, 'lat'))
-    ```
+routes = {route_id: {'proposed': {}} for route_id in data_set.route_ids}
 
-    Output:
-    ```
-    {
-        "Depot":1,
-        "StopID_001":3,
-        "StopID_002":2
-    }
-    ```
+def route_sequencer(start_node, travel_time, start_time, end_time, volume, service):
+    #Parameters
+    available_nodes = set(range(travel_time.shape[0]))
+    visited_nodes = set([])
+    sequence = []
+    visited_nodes.add(start_node)
+    sequence.append(start_node)
+    current = start_node
+    
+    #Initial state
+    d = distance[start_node, :].view(-1,1)
+    
+    x = torch.cat([d, service, volume, start_time, end_time], dim=1)
+    
+    for i in range(travel_time.shape[0]):
+        if len(visited_nodes) == travel_time.shape[0]:
+            break
+        
+        idx = list(available_nodes-visited_nodes)
+        evals = net(x[idx,:]).view(1,-1)
+        selected_node = idx[torch.argmax(evals)]
+        
+        visited_nodes.add(selected_node)
+        sequence.append(selected_node)
+        current = selected_node
+        
+        #Create new x
+        d = distance[current, :].view(-1,1)
+        volume[selected_node] = 0
+        service[selected_node] = 0
+        x = torch.cat([d, service, volume, start_time, end_time], dim=1)
+        
+    return sequence
 
-    """
-    # Serialize keys as id into each dictionary value and make the dict a list
-    stops_list=[{**value, **{'id':key}} for key, value in stops.items()]
-
-    # Sort the stops list by the key specified when calling the sort_by_key func
-    ordered_stop_list=sorted(stops_list, key=lambda x: x[sort_by])
-
-    # Keep only sorted list of ids
-    ordered_stop_list_ids=[i['id'] for i in ordered_stop_list]
-
-    # Serialize back to dictionary format with output order as the values
-    return {i:ordered_stop_list_ids.index(i) for i in ordered_stop_list_ids}
-
-def propose_all_routes(prediction_routes, sort_by):
-    """
-    Applies `sort_by_key` to each route's set of stops and returns them in a dictionary under `output[route_id]['proposed']`
-
-    EG:
-
-    Input:
-    ```
-    prediction_routes = {
-      "RouteID_001": {
-        ...
-        "stops": {
-          "Depot": {
-            "lat": 42.139891,
-            "lng": -71.494346,
-            "type": "depot",
-            "zone_id": null
-          },
-          ...
-        }
-      },
-      ...
-    }
-
-    print(propose_all_routes(prediction_routes, 'lat'))
-    ```
-
-    Output:
-    ```
-    {
-      "RouteID_001": {
-        "proposed": {
-          "Depot": 0,
-          "StopID_001": 1,
-          "StopID_002": 2
-        }
-      },
-      ...
-    }
-    ```
-    """
-    return {key:{'proposed':sort_by_key(stops=value['stops'], sort_by=sort_by)} for key, value in prediction_routes.items()}
-
-# Apply faux algorithms to pass time
-time.sleep(1)
-print('Solving Dark Matter Waveforms')
-time.sleep(1)
-print('Quantum Computer is Overheating')
-time.sleep(1)
-print('Trying Alternate Measurement Cycles')
-time.sleep(1)
-print('Found a Great Solution!')
-time.sleep(1)
-print('Checking Validity')
-time.sleep(1)
-print('The Answer is 42!')
-time.sleep(1)
-
-
-print('\nApplying answer with real model...')
-sort_by=model_build_out.get("sort_by")
-print('Sorting data by the key: {}'.format(sort_by))
-output=propose_all_routes(prediction_routes=prediction_routes, sort_by=sort_by)
-print('Data sorted!')
+for route_id in tqdm(data_set.route_ids, total=len(data_set.route_ids)):
+    keys = np.array(list(data_set.routes[route_id]['stops'].keys()))
+    distance = data_set.distance_matrix(route_id)
+    ser, vol, st, et = data_set.parse_packages(route_id)
+    start_node = data_set.get_start_node(route_id)
+    ser, vol, st, et = ser.view(-1,1), vol.view(-1,1), st.view(-1,1), et.view(-1,1)
+    
+    sequence = route_sequencer(start_node, distance, st, et, vol, ser)
+    
+    for i, stop in enumerate(keys[sequence]):
+        routes[route_id]['proposed'][stop] = i
 
 # Write output data
-output_path=path.join(BASE_DIR, 'data/model_apply_outputs/proposed_sequences.json')
+output_path = path.join(BASE_DIR, 'data/model_apply_outputs/proposed_sequences.json')
+
 with open(output_path, 'w') as out_file:
-    json.dump(output, out_file)
+    json.dump(routes, out_file)
     print("Success: The '{}' file has been saved".format(output_path))
 
 print('Done!')
